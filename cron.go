@@ -7,6 +7,7 @@ import (
 	"runtime"
 	"sort"
 	"time"
+	"github.com/dchest/uniuri"
 )
 
 // Cron keeps track of any number of entries, invoking the associated func as
@@ -16,6 +17,7 @@ type Cron struct {
 	entries  []*Entry
 	stop     chan struct{}
 	add      chan *Entry
+	remove   chan string
 	snapshot chan []*Entry
 	running  bool
 	ErrorLog *log.Logger
@@ -49,6 +51,9 @@ type Entry struct {
 
 	// The Job to run.
 	Job Job
+
+	// Unique identifier of this job
+	Id string
 }
 
 // byTime is a wrapper for sorting the entry array by time
@@ -80,6 +85,7 @@ func NewWithLocation(location *time.Location) *Cron {
 	return &Cron{
 		entries:  nil,
 		add:      make(chan *Entry),
+		remove:   make(chan string),
 		stop:     make(chan struct{}),
 		snapshot: make(chan []*Entry),
 		running:  false,
@@ -94,32 +100,54 @@ type FuncJob func()
 func (f FuncJob) Run() { f() }
 
 // AddFunc adds a func to the Cron to be run on the given schedule.
-func (c *Cron) AddFunc(spec string, cmd func()) error {
+func (c *Cron) AddFunc(spec string, cmd func()) (string, error) {
 	return c.AddJob(spec, FuncJob(cmd))
 }
 
 // AddJob adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) AddJob(spec string, cmd Job) error {
+func (c *Cron) AddJob(spec string, cmd Job) (string, error) {
 	schedule, err := Parse(spec)
 	if err != nil {
-		return err
+		return "", err
 	}
-	c.Schedule(schedule, cmd)
-	return nil
+	return c.Schedule(schedule, cmd), nil
+}
+
+func (c *Cron) removeById(id string) bool {
+	idx := -1
+	for i := range c.entries {
+		if c.entries[i].Id == id {
+			idx = i
+			break
+		}
+	}
+	if idx != -1 {
+		c.entries = append(c.entries[:idx], c.entries[idx+1:]...)
+	}
+	return idx != -1
+}
+
+func (c* Cron) RemoveJob(id string) {
+	if c.running {
+		c.remove <- id
+	} else {
+		c.removeById(id)
+	}
 }
 
 // Schedule adds a Job to the Cron to be run on the given schedule.
-func (c *Cron) Schedule(schedule Schedule, cmd Job) {
+func (c *Cron) Schedule(schedule Schedule, cmd Job) string {
 	entry := &Entry{
 		Schedule: schedule,
 		Job:      cmd,
+		Id: uniuri.NewLen(30),
 	}
-	if !c.running {
+	if c.running {
+		c.add <- entry
+	} else {
 		c.entries = append(c.entries, entry)
-		return
 	}
-
-	c.add <- entry
+	return entry.Id
 }
 
 // Entries returns a snapshot of the cron entries.
@@ -198,6 +226,10 @@ func (c *Cron) run() {
 			c.entries = append(c.entries, newEntry)
 			newEntry.Next = newEntry.Schedule.Next(time.Now().In(c.location))
 
+
+		case removeId := <-c.remove:
+			c.removeById(removeId)
+
 		case <-c.snapshot:
 			c.snapshot <- c.entrySnapshot()
 
@@ -206,7 +238,8 @@ func (c *Cron) run() {
 			return
 		}
 
-		// 'now' should be updated after newEntry and snapshot cases.
+		// 'now' should be updated after newEntry, remove
+		// and snapshot cases.
 		now = time.Now().In(c.location)
 		timer.Stop()
 	}

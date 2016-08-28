@@ -318,6 +318,40 @@ func TestJob(t *testing.T) {
 	}
 }
 
+func TestRemove(t *testing.T) {
+	cron := New()
+	n := 0
+	cron.AddFunc("@every 1s", func() {
+		if n < 10 {
+			n++
+		}
+	})
+	var id string
+	m := 0
+	id, _ = cron.AddFunc("@every 2s", func() {
+		m++
+		if m >= 2 {
+			cron.RemoveJob(id)
+		}
+	})
+	cron.Start()
+	defer cron.Stop()
+	time.Sleep(1 * time.Second)
+	if count := len(cron.Entries()); count != 2 {
+		t.Fatal("invalid job count 1", count)
+	}
+	time.Sleep(15 * time.Second)
+	if count := len(cron.Entries()); count != 1 {
+		t.Fatal("invalid job count 1", count)
+	}
+	if n != 10 {
+		t.Fatal("t1 not called 10 times")
+	}
+	if m != 2 {
+		t.Fatal("t2 not called 2 times")
+	}
+}
+
 func wait(wg *sync.WaitGroup) chan bool {
 	ch := make(chan bool)
 	go func() {
